@@ -127,13 +127,83 @@ def _write_summary(ws, df: pd.DataFrame):
         ws.column_dimensions[letter].width = w
 
 
-def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
+_SUMMARY_COLS = {"통화", "경비구분", "결제금액", "검토여부", "파일명"}
+
+
+def _write_summary_values(ws, full_df: pd.DataFrame):
+    """선택한 컬럼에 집계용 컬럼이 빠졌을 때: 수식 대신 계산된 값으로 집계."""
+    summary = build_summary_df(full_df)
+    summary = summary[summary["건수"] > 0]
+    headers = ["통화", "경비구분", "건수", "금액합계"]
+    for c, h in enumerate(headers, start=1):
+        ws.cell(row=1, column=c, value=h)
+    _style_header(ws, len(headers))
+    r = 2
+    for _, row in summary.iterrows():
+        for c, h in enumerate(headers, start=1):
+            v = row[h]
+            ws.cell(row=r, column=c, value=v.item() if hasattr(v, "item") else v)
+            ws.cell(row=r, column=c).border = _BORDER
+        ws.cell(row=r, column=4).number_format = "#,##0.##"
+        if row["경비구분"] == "합계":
+            for c in range(1, 5):
+                ws.cell(row=r, column=c).fill = _TOTAL_FILL
+                ws.cell(row=r, column=c).font = Font(bold=True)
+        r += 1
+    r += 1
+    review = int((full_df.get("검토여부") == "검토 필요").sum()) if "검토여부" in full_df else 0
+    ws.cell(row=r, column=1, value="검토 필요 건수").font = Font(bold=True)
+    ws.cell(row=r, column=3, value=review)
+    ws.cell(row=r + 1, column=1, value="전체 영수증 수").font = Font(bold=True)
+    ws.cell(row=r + 1, column=3, value=len(full_df))
+    for letter, w in zip("ABCD", (10, 12, 10, 16)):
+        ws.column_dimensions[letter].width = w
+
+
+def resolve_headers(columns: list[str], rename: dict[str, str]) -> tuple[dict[str, str], list[str]]:
+    """
+    화면에서 입력한 새 이름을 정리한다.
+    반환: ({원래 이름: 엑셀 이름}, 중복된 엑셀 이름 목록)
+    빈칸이면 원래 이름을 쓴다.
+    """
+    headers = {}
+    for col in columns:
+        new = str(rename.get(col) or "").strip()
+        headers[col] = new or col
+    seen, dup = set(), []
+    for name in headers.values():
+        if name in seen and name not in dup:
+            dup.append(name)
+        seen.add(name)
+    return headers, dup
+
+
+def dataframe_to_excel_bytes(
+    df: pd.DataFrame,
+    columns: list[str] | None = None,
+    include_summary: bool = True,
+    headers: dict[str, str] | None = None,
+) -> bytes:
+    """
+    df: 전체 결과(화면에서 수정한 값 포함)
+    columns: 엑셀에 넣을 컬럼 (순서대로). None이면 전체
+    include_summary: 집계 시트 포함 여부
+    headers: {원래 컬럼명: 엑셀에 표시할 이름} (바꾸지 않은 컬럼은 생략 가능)
+    """
+    export_df = df[columns] if columns else df
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name=DETAIL_SHEET)
-        _write_detail(writer.sheets[DETAIL_SHEET], df)
-        if {"통화", "경비구분", "결제금액", "검토여부", "파일명"} <= set(df.columns):
+        export_df.to_excel(writer, index=False, sheet_name=DETAIL_SHEET)
+        _write_detail(writer.sheets[DETAIL_SHEET], export_df)
+        if headers:  # 서식·수식은 원래 이름 기준으로 만든 뒤, 제목 칸 글자만 바꾼다
+            ws_detail = writer.sheets[DETAIL_SHEET]
+            for i, name in enumerate(export_df.columns, start=1):
+                ws_detail.cell(row=1, column=i, value=headers.get(name) or name)
+        if include_summary and {"통화", "경비구분", "결제금액"} <= set(df.columns):
             ws = writer.book.create_sheet(SUMMARY_SHEET)
-            _write_summary(ws, df)
+            if _SUMMARY_COLS <= set(export_df.columns):
+                _write_summary(ws, export_df)  # 수식: 경비내역을 고치면 같이 바뀜
+            else:
+                _write_summary_values(ws, df)  # 값: 선택에서 빠진 컬럼이 있을 때
     output.seek(0)
     return output.getvalue()
