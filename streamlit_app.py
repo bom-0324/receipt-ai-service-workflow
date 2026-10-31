@@ -5,7 +5,9 @@ import streamlit as st
 
 import config
 from excel_builder import build_summary_df, dataframe_to_excel_bytes, resolve_headers
-from normalize import CATEGORIES, COLUMNS
+from media import build_zip, evidence_filename, make_preview, prepare_upload
+from normalize import CATEGORIES, COLUMNS, REVIEW_OPTIONS, normalize_date, parse_amount
+from records import add_quarter, detect_duplicates, read_previous_excel
 from service import process_receipts
 
 try:  # 드래그로 컬럼 순서를 바꾸는 컴포넌트 (pip install streamlit-sortables)
@@ -18,6 +20,18 @@ st.set_page_config(page_title="영수증 경비 정리 서비스", layout="wide"
 st.title("영수증 경비 정리 서비스")
 st.write("영수증을 여러 장 올리면 1장당 1행으로 정리하고 엑셀로 내려받을 수 있습니다.")
 
+CURRENCIES = ["KRW", "USD", "JPY", "EUR", "CNY", "GBP"]
+
+
+@st.cache_data(show_spinner=False, max_entries=200)
+def cached_preview(name: str, data: bytes):
+    return make_preview(name, data)
+
+
+def text(v) -> str:
+    return "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v)
+
+
 ##################################################
 # 설정 확인
 ##################################################
@@ -25,7 +39,7 @@ st.write("영수증을 여러 장 올리면 1장당 1행으로 정리하고 엑�
 missing = config.missing_settings()
 if missing:
     st.error(
-        "다음 환경변수가 비어 있어 분석을 실행할 수 없습니다: "
+        "다음 환경변수가 비어 있어 영수증 분석을 실행할 수 없습니다: "
         + ", ".join(missing)
         + "\n\n로컬은 .env 파일, Railway는 Variables 탭에 넣은 뒤 다시 실행하세요."
     )
@@ -37,95 +51,218 @@ if config.USE_MOCK:
 ##################################################
 
 uploaded_files = st.file_uploader(
-    "영수증 이미지 또는 PDF를 업로드하세요.",
-    type=["png", "jpg", "jpeg", "pdf"],
+    "영수증 이미지 또는 PDF를 업로드하세요. (아이폰 HEIC 사진도 됩니다)",
+    type=["png", "jpg", "jpeg", "pdf", "heic", "heif"],
     accept_multiple_files=True,
 )
+previous_xlsx = st.file_uploader(
+    "이어서 정리하기 (선택): 이전에 이 서비스에서 받은 엑셀을 올리면 새 영수증과 합쳐집니다.",
+    type=["xlsx"],
+)
 
-# 업로드 목록이 바뀌면 이전 결과를 지운다.
-upload_key = tuple((f.name, f.size) for f in uploaded_files or [])
+# 올린 파일이 바뀌면 이전 결과를 지운다.
+upload_key = tuple((f.name, f.size) for f in (uploaded_files or [])) + (
+    (previous_xlsx.name, previous_xlsx.size) if previous_xlsx else (),
+)
 if st.session_state.get("upload_key") != upload_key:
     st.session_state.upload_key = upload_key
-    st.session_state.pop("result", None)
+    st.session_state.pop("work", None)
 
-if st.button("분석 시작", type="primary", disabled=bool(missing)):
-    if not uploaded_files:
-        st.warning("먼저 영수증 파일을 업로드해주세요.")
-    else:
+can_run = bool(uploaded_files or previous_xlsx) and not (missing and uploaded_files)
+if st.button("분석 시작", type="primary", disabled=not can_run):
+    # 1) 이전 엑셀
+    prev_df = pd.DataFrame(columns=COLUMNS)
+    if previous_xlsx:
+        try:
+            prev_df = read_previous_excel(previous_xlsx.getvalue())
+        except Exception as e:  # noqa: BLE001
+            st.error(f"이전 엑셀을 읽지 못했습니다: {e}")
+            st.stop()
+
+    # 2) 새 영수증 (HEIC → JPG)
+    prepared, prep_errors = [], []
+    for f in uploaded_files or []:
+        name, data, err = prepare_upload(f.name, f.getvalue())
+        (prep_errors.append(err) if err else prepared.append((name, data)))
+
+    new_df, details, originals = pd.DataFrame(columns=COLUMNS + ["_id"]), [], {}
+    if prepared:
         progress = st.progress(0.0, text="분석 준비 중...")
 
         def on_progress(done, total, name):
             progress.progress(done / total, text=f"{done}/{total} 완료 · {name}")
 
         with st.spinner("Upstage Studio에서 영수증을 분석하고 있습니다..."):
-            st.session_state.result = process_receipts(uploaded_files, on_progress)
-        # 새 분석이면 표 편집 상태도 새로 시작한다.
-        st.session_state.run_id = st.session_state.get("run_id", 0) + 1
+            new_df, details, originals = process_receipts(prepared, on_progress)
         progress.empty()
+
+    # 3) 합치고 중복 확인 (이전 엑셀 행은 표시하지 않고 새 영수증만 표시)
+    combined = pd.concat([prev_df.assign(_id=None), new_df], ignore_index=True)
+    combined["결제금액"] = pd.to_numeric(combined["결제금액"], errors="coerce")
+    mark = [False] * len(prev_df) + [True] * len(new_df)
+    combined, dup_count = detect_duplicates(combined, mark)
+
+    st.session_state.work = {
+        "df": add_quarter(combined)[COLUMNS + ["_id"]],
+        "details": details,
+        "originals": originals,
+        "ver": st.session_state.get("work", {}).get("ver", 0) + 1,
+        "prev_count": len(prev_df),
+        "dup_count": dup_count,
+        "prep_errors": prep_errors,
+    }
 
 ##################################################
 # 결과
 ##################################################
 
-result = st.session_state.get("result")
-if result:
-    df, details = result
+work = st.session_state.get("work")
+if work:
+    df, details, originals, ver = work["df"], work["details"], work["originals"], work["ver"]
+
+    for err in work["prep_errors"]:
+        st.error(err)
     failed = [d for d in details if d["errors"]]
     if failed:
-        st.warning(f"{len(failed)}개 파일에서 오류가 있었습니다. 아래 '분석 상세'를 확인하세요.")
+        st.warning(f"{len(failed)}개 파일에서 분석 오류가 있었습니다. 아래 '분석 상세'를 확인하세요.")
+    if work["prev_count"]:
+        st.info(f"이전 엑셀에서 {work['prev_count']}건을 불러와 새 영수증과 합쳤습니다.")
+    if work["dup_count"]:
+        st.warning(f"날짜·상호·금액이 같은 중복 의심 영수증이 {work['dup_count']}건 있습니다.")
 
-    # ---------- 1. 결과 표 (직접 수정) ----------
-    st.subheader("분석 결과")
-    st.caption(
-        "셀을 더블클릭해 값을 고칠 수 있습니다. 고친 내용은 집계와 엑셀에 바로 반영됩니다. "
-        "맨 아래 빈 줄에서 행을 추가하고, 왼쪽 체크박스로 행을 골라 삭제할 수 있습니다."
-    )
+    currency_options = sorted(set(CURRENCIES) | {c for c in df["통화"].dropna() if c})
 
-    currency_options = sorted({"KRW", "USD", "JPY", "EUR", "CNY", "GBP"}
-                              | {c for c in df["통화"].dropna() if c})
+    tab_review, tab_all = st.tabs(["검토 필요 확인", "전체 결과 표"])
 
-    edited = st.data_editor(
-        df,
-        key=f"editor_{st.session_state.get('run_id', 0)}",
-        num_rows="dynamic",
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "사용일자": st.column_config.TextColumn(
-                "사용일자", help="YYYY-MM-DD 형식", validate=r"^(\d{4}-\d{2}-\d{2})?$"
-            ),
-            "상호명": st.column_config.TextColumn("상호명"),
-            "결제금액": st.column_config.NumberColumn(
-                "결제금액", format="localized", min_value=0, step=1
-            ),
-            "경비구분": st.column_config.SelectboxColumn("경비구분", options=list(CATEGORIES)),
-            "통화": st.column_config.SelectboxColumn("통화", options=currency_options),
-            "검토여부": st.column_config.SelectboxColumn(
-                "검토여부", options=["검토 필요", "검토 불필요"]
-            ),
-            "사유": st.column_config.TextColumn("사유", width="large"),
-            "파일명": st.column_config.TextColumn("파일명", disabled=True),
-        },
-    )
-    edited = edited.reset_index(drop=True)
-    edited["결제금액"] = pd.to_numeric(edited["결제금액"], errors="coerce")
+    # ---------- 전체 결과 표 (직접 수정) ----------
+    # 검토 탭이 이 표의 최신 값을 써야 하므로 코드는 이 탭을 먼저 실행한다.
+    with tab_all:
+        st.caption(
+            "셀을 더블클릭해 값을 고칠 수 있습니다. 맨 아래 빈 줄에서 행을 추가하고, "
+            "왼쪽 체크박스로 행을 골라 삭제할 수 있습니다. 분기는 사용일자로 자동 계산됩니다."
+        )
+        edited = st.data_editor(
+            df,
+            key=f"editor_{ver}",
+            num_rows="dynamic",
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "_id": None,  # 숨김: 원본 사진 연결용
+                "사용일자": st.column_config.TextColumn(
+                    "사용일자", help="YYYY-MM-DD 형식", validate=r"^(\d{4}-\d{2}-\d{2})?$"
+                ),
+                "분기": st.column_config.TextColumn("분기", disabled=True),
+                "결제금액": st.column_config.NumberColumn(
+                    "결제금액", format="localized", min_value=0, step=1
+                ),
+                "경비구분": st.column_config.SelectboxColumn("경비구분", options=list(CATEGORIES)),
+                "통화": st.column_config.SelectboxColumn("통화", options=currency_options),
+                "검토여부": st.column_config.SelectboxColumn("검토여부", options=REVIEW_OPTIONS),
+                "사유": st.column_config.TextColumn("사유", width="large"),
+                "파일명": st.column_config.TextColumn("파일명", disabled=True),
+            },
+        )
+        edited = add_quarter(edited.reset_index(drop=True))
+        edited["결제금액"] = pd.to_numeric(edited["결제금액"], errors="coerce")
 
-    # ---------- 2. 요약 (수정한 값 기준) ----------
-    need_review = int((edited["검토여부"] == "검토 필요").sum())
-    c1, c2, c3 = st.columns(3)
+    # ---------- 검토 필요 확인 (사진 보며 수정) ----------
+    with tab_review:
+        pending = edited.index[edited["검토여부"] == "검토 필요"].tolist()
+        if not pending:
+            st.success("검토가 필요한 영수증이 없습니다. 엑셀을 내려받으셔도 됩니다.")
+        else:
+            st.caption(f"남은 검토 {len(pending)}건 · '확인 완료'를 누르면 '검토 완료'로 바뀌고 다음 건으로 넘어갑니다.")
+
+            def label(i):
+                r = edited.loc[i]
+                amt = f"{r['결제금액']:,.0f}" if pd.notna(r["결제금액"]) else "금액 없음"
+                return f"{text(r['파일명']) or '(직접 추가한 행)'} · {text(r['상호명']) or '상호 없음'} · {amt}"
+
+            pick = st.selectbox("확인할 영수증", pending, format_func=label, key=f"pick_{ver}")
+            row = edited.loc[pick]
+            left, right = st.columns([1, 1])
+
+            with left:
+                rid = row.get("_id")
+                if isinstance(rid, str) and rid in originals:
+                    src_name, src_data = originals[rid]
+                    preview = cached_preview(src_name, src_data)
+                    if preview:
+                        st.image(preview, caption=src_name)
+                    else:
+                        st.info("미리보기를 만들 수 없는 파일입니다. 내려받아 확인하세요.")
+                        st.download_button("원본 내려받기", src_data, file_name=src_name)
+                else:
+                    st.info("원본 사진이 없는 행입니다. (이전 엑셀에서 불러왔거나 직접 추가한 행)")
+
+            with right:
+                st.markdown("**검토 사유**")
+                st.write(text(row["사유"]) or "(사유 없음)")
+                with st.form(f"review_{ver}_{pick}"):
+                    f_date = st.text_input("사용일자 (YYYY-MM-DD)", value=text(row["사용일자"]))
+                    f_store = st.text_input("상호명", value=text(row["상호명"]))
+                    f_amount = st.text_input(
+                        "결제금액",
+                        value="" if pd.isna(row["결제금액"]) else f"{row['결제금액']:,.0f}",
+                    )
+                    cat_now = text(row["경비구분"])
+                    f_cat = st.selectbox(
+                        "경비구분", CATEGORIES,
+                        index=CATEGORIES.index(cat_now) if cat_now in CATEGORIES else len(CATEGORIES) - 1,
+                    )
+                    cur_now = text(row["통화"]) or "KRW"
+                    f_cur = st.selectbox(
+                        "통화", currency_options,
+                        index=currency_options.index(cur_now) if cur_now in currency_options else 0,
+                    )
+                    f_memo = st.text_area("사유 (메모)", value=text(row["사유"]), height=90)
+                    b1, b2 = st.columns(2)
+                    done = b1.form_submit_button("확인 완료", type="primary")
+                    keep = b2.form_submit_button("수정만 저장")
+
+                if done or keep:
+                    date_ok = normalize_date(f_date) if f_date.strip() else ""
+                    if f_date.strip() and not re.match(r"^\d{4}-\d{2}-\d{2}$", date_ok):
+                        st.error("사용일자는 2022-02-21 같은 형식으로 입력해주세요.")
+                    else:
+                        new_df = edited.copy()
+                        new_df.at[pick, "사용일자"] = date_ok
+                        new_df.at[pick, "상호명"] = f_store.strip()
+                        amount = parse_amount(f_amount)
+                        new_df.at[pick, "결제금액"] = amount if amount else float("nan")
+                        new_df.at[pick, "경비구분"] = f_cat
+                        new_df.at[pick, "통화"] = f_cur
+                        new_df.at[pick, "사유"] = f_memo.strip()
+                        if done:
+                            new_df.at[pick, "검토여부"] = "검토 완료"
+                        work["df"] = add_quarter(new_df)[COLUMNS + ["_id"]]
+                        work["ver"] = ver + 1
+                        st.rerun()
+
+    # ---------- 요약 ----------
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("영수증", f"{len(edited)}장")
-    c2.metric("검토 필요", f"{need_review}건")
+    c2.metric("검토 필요", f"{int((edited['검토여부'] == '검토 필요').sum())}건")
+    c3.metric("검토 완료", f"{int((edited['검토여부'] == '검토 완료').sum())}건")
     krw = edited.loc[edited["통화"] == "KRW", "결제금액"].sum()
-    c3.metric("KRW 합계", f"{krw:,.0f}원")
+    c4.metric("KRW 합계", f"{krw:,.0f}원")
 
-    st.subheader("집계")
-    summary_df = build_summary_df(edited)
-    st.dataframe(summary_df[summary_df["건수"] > 0], hide_index=True)
-
-    # ---------- 3. 엑셀 내보내기 ----------
+    # ---------- 엑셀 내보내기 ----------
     st.subheader("엑셀 내보내기")
 
-    # (1) 컬럼 고르기·순서 바꾸기: 드래그
+    # (1) 분기 고르기
+    quarters = sorted({q for q in edited["분기"] if q})
+    has_unknown = bool((edited["분기"] == "").any())
+    q_options = quarters + (["날짜 없음"] if has_unknown else [])
+    picked_q = st.multiselect("내보낼 분기", q_options, default=q_options) if len(q_options) > 1 else q_options
+    mask = edited["분기"].isin(picked_q) | (("날짜 없음" in picked_q) & (edited["분기"] == ""))
+    export_rows = edited[mask].reset_index(drop=True)
+
+    summary_df = build_summary_df(export_rows)
+    st.dataframe(summary_df[summary_df["건수"] > 0], hide_index=True)
+
+    # (2) 컬럼 고르기·순서 바꾸기
     if sort_items is not None:
         st.caption("컬럼을 끌어서 순서를 바꾸고, 엑셀에서 뺄 컬럼은 아래 '제외' 칸으로 옮기세요.")
         boxes = sort_items(
@@ -137,12 +274,12 @@ if result:
             key="column_sorter",
         )
         selected_cols = [c for c in boxes[0]["items"] if c in COLUMNS]
-    else:  # 패키지가 없을 때 대체 화면
+    else:
         selected_cols = st.multiselect(
             "엑셀에 넣을 컬럼 (고른 순서대로 들어갑니다)", options=COLUMNS, default=COLUMNS
         )
 
-    # (2) 컬럼 이름 바꾸기
+    # (3) 컬럼 이름 바꾸기
     with st.expander("엑셀 컬럼 이름 바꾸기"):
         st.caption("오른쪽 칸을 더블클릭해 고치세요. 비워두면 원래 이름을 씁니다.")
         rename_df = st.data_editor(
@@ -153,41 +290,79 @@ if result:
             column_config={"원래 이름": st.column_config.TextColumn(disabled=True)},
         )
     rename_map = dict(zip(rename_df["원래 이름"], rename_df["엑셀에 표시할 이름"]))
-    headers, duplicated = resolve_headers(selected_cols, rename_map)
 
+    # (4) 옵션
+    col_a, col_b, col_c = st.columns([2, 1, 1])
+    file_stem = col_a.text_input("파일 이름", value="expense_result")
+    include_summary = col_b.checkbox("집계 시트 포함", value=True)
+    want_zip = col_c.checkbox(
+        "증빙 사진 zip도 받기",
+        value=False,
+        help="엑셀 행 번호에 맞춰 사진 이름을 바꿔 묶어줍니다. 엑셀에 '증빙파일' 컬럼이 추가됩니다.",
+    )
+
+    zip_items = []
+    if want_zip:
+        export_rows = export_rows.copy()
+        names = []
+        for no, (_, r) in enumerate(export_rows.iterrows(), start=1):
+            rid = r.get("_id")
+            if isinstance(rid, str) and rid in originals:
+                src_name, src_data = originals[rid]
+                zname = evidence_filename(no, r["사용일자"], r["상호명"], src_name)
+                zip_items.append((zname, src_data))
+                names.append(zname)
+            else:
+                names.append("")
+        export_rows["증빙파일"] = names
+        selected_cols = selected_cols + ["증빙파일"]
+
+    headers, duplicated = resolve_headers(selected_cols, rename_map)
     if selected_cols:
         st.caption("엑셀 순서: " + "  →  ".join(headers[c] for c in selected_cols))
 
-    # (3) 파일 이름·다운로드
-    col_a, col_b = st.columns([2, 1])
-    file_stem = col_a.text_input("파일 이름", value="expense_result")
-    include_summary = col_b.checkbox("집계 시트 포함", value=True)
-
-    if not selected_cols:
+    if export_rows.empty:
+        st.info("선택한 분기에 해당하는 영수증이 없습니다.")
+    elif not [c for c in selected_cols if c != "증빙파일"]:
         st.info("엑셀에 넣을 컬럼을 하나 이상 남겨주세요.")
     elif duplicated:
         st.error("엑셀 컬럼 이름이 겹칩니다: " + ", ".join(duplicated))
     else:
         safe_stem = re.sub(r'[\\/:*?"<>|]', "_", file_stem.strip()) or "expense_result"
+        pending_left = int((export_rows["검토여부"] == "검토 필요").sum())
+        if pending_left:
+            st.caption(f"아직 검토 필요 {pending_left}건이 남아 있습니다. 엑셀에서는 노란색으로 표시됩니다.")
         excel_bytes = dataframe_to_excel_bytes(
-            edited, columns=selected_cols, include_summary=include_summary, headers=headers
+            export_rows, columns=selected_cols, include_summary=include_summary, headers=headers
         )
-        st.download_button(
-            label=f"엑셀 다운로드 ({len(selected_cols)}개 컬럼)",
+        d1, d2 = st.columns(2)
+        d1.download_button(
+            label=f"엑셀 다운로드 ({len(export_rows)}건)",
             data=excel_bytes,
             file_name=f"{safe_stem}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
         )
+        if want_zip:
+            if zip_items:
+                d2.download_button(
+                    label=f"증빙 사진 zip ({len(zip_items)}장)",
+                    data=build_zip(zip_items),
+                    file_name=f"{safe_stem}_증빙.zip",
+                    mime="application/zip",
+                )
+            else:
+                d2.info("묶을 원본 사진이 없습니다.")
 
-    # ---------- 4. 분석 상세 ----------
-    with st.expander("분석 상세 (Agent 원본 응답·오류)"):
-        for d in details:
-            st.markdown(f"**{d['파일명']}**")
-            for err in d["errors"]:
-                st.error(err)
-            col_x, col_y = st.columns(2)
-            col_x.caption("1번 추출 Agent 응답")
-            col_x.code(d["extract_raw"] or "(없음)", language="json")
-            col_y.caption("2번 검토 Agent 응답")
-            col_y.code(d["review_raw"] or "(없음)", language="json")
+    # ---------- 분석 상세 ----------
+    if details:
+        with st.expander("분석 상세 (Agent 원본 응답·오류)"):
+            for d in details:
+                st.markdown(f"**{d['파일명']}**")
+                for err in d["errors"]:
+                    st.error(err)
+                col_x, col_y = st.columns(2)
+                col_x.caption("1번 추출 Agent 응답")
+                col_x.code(d["extract_raw"] or "(없음)", language="json")
+                col_y.caption("2번 검토 Agent 응답")
+                col_y.code(d["review_raw"] or "(없음)", language="json")

@@ -205,6 +205,8 @@ def normalize_review(v) -> str:
     s = str(v or "").strip().lower().replace(" ", "")
     if not s:
         return ""
+    if "완료" in s:
+        return "검토 완료"
     if any(w in s for w in ("불필요", "필요없", "없음", "아니", "false", "no")) or s in ("n", "0", "x"):
         return "검토 불필요"
     if any(w in s for w in ("필요", "검토", "true", "yes", "확인")) or s in ("y", "1", "o"):
@@ -222,7 +224,7 @@ def normalize_extract(data: dict) -> dict:
     return {
         "사용일자": normalize_date(f["사용일자"]),
         "상호명": str(f["상호명"] or ""),
-        "결제금액": parse_amount(amount_raw),
+        "결제금액": parse_amount(amount_raw) or None,
         "경비구분": normalize_category(f["경비구분"]),
         "통화": currency,
     }
@@ -241,7 +243,8 @@ def normalize_review_result(data: dict) -> dict:
 # 1번 + 2번 결과 합치기
 ##################################################
 
-COLUMNS = ["사용일자", "상호명", "결제금액", "경비구분", "통화", "검토여부", "사유", "파일명"]
+COLUMNS = ["사용일자", "분기", "상호명", "결제금액", "경비구분", "통화", "검토여부", "사유", "파일명"]
+REVIEW_OPTIONS = ["검토 필요", "검토 완료", "검토 불필요"]
 
 
 def merge_row(file_name: str, extract: dict | None, review: dict | None, errors: list[str]) -> dict:

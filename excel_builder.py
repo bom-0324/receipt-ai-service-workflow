@@ -27,8 +27,10 @@ _TOTAL_FILL = PatternFill("solid", fgColor="DDEBF7")
 _THIN = Side(style="thin", color="BFBFBF")
 _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 
-_WIDTHS = {"사용일자": 12, "상호명": 28, "결제금액": 14, "경비구분": 10,
-           "통화": 8, "검토여부": 12, "사유": 50, "파일명": 28}
+_WIDTHS = {"사용일자": 12, "분기": 13, "상호명": 28, "결제금액": 14, "경비구분": 10,
+           "통화": 8, "검토여부": 12, "사유": 50, "파일명": 28, "증빙파일": 36}
+
+META_SHEET = "_columns"  # 숨김 시트: 원래 컬럼 이름 (이전 엑셀 불러오기용)
 
 
 def build_summary_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -190,7 +192,8 @@ def dataframe_to_excel_bytes(
     include_summary: 집계 시트 포함 여부
     headers: {원래 컬럼명: 엑셀에 표시할 이름} (바꾸지 않은 컬럼은 생략 가능)
     """
-    export_df = df[columns] if columns else df
+    columns = columns or [c for c in df.columns if not str(c).startswith("_")]
+    export_df = df[columns]
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         export_df.to_excel(writer, index=False, sheet_name=DETAIL_SHEET)
@@ -205,5 +208,9 @@ def dataframe_to_excel_bytes(
                 _write_summary(ws, export_df)  # 수식: 경비내역을 고치면 같이 바뀜
             else:
                 _write_summary_values(ws, df)  # 값: 선택에서 빠진 컬럼이 있을 때
+        meta = writer.book.create_sheet(META_SHEET)
+        for i, name in enumerate(export_df.columns, start=1):
+            meta.cell(row=1, column=i, value=name)
+        meta.sheet_state = "hidden"
     output.seek(0)
     return output.getvalue()
