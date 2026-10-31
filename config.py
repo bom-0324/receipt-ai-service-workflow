@@ -1,10 +1,75 @@
+"""
+config.py
+
+환경설정: API 키, Studio Agent ID, Config ID, 호출 옵션.
+값은 .env(로컬) 또는 Railway Variables(배포)에서 읽는다.
+"""
+
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-UPSTAGE_API_KEY = os.getenv("UPSTAGE_API_KEY", "")
 
-RECEIPT_EXTRACT_AGENT_ID = "agt_5iE2WDDBSUgSQtUKVYTDPB"
-EXPENSE_REVIEW_AGENT_ID = "agt_XnU6HKXmfTtzZDXDUdWte7"
-EXCEL_SUMMARY_AGENT_ID = "agt_iBcXUvFaeUGnnEEDJEhJib"
+def _env(name: str, default: str = "") -> str:
+    return (os.getenv(name) or default).strip()
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(_env(name, str(default)))
+    except ValueError:
+        return default
+
+##################################################
+# Upstage API
+##################################################
+
+UPSTAGE_API_KEY = _env("UPSTAGE_API_KEY")
+UPSTAGE_BASE_URL = _env("UPSTAGE_BASE_URL", "https://api.upstage.ai/v2")
+
+##################################################
+# Studio Agent ID ("API로 이용하기"에서 복사한 agt_ 값)
+##################################################
+
+RECEIPT_EXTRACT_AGENT_ID = _env("RECEIPT_EXTRACT_AGENT_ID", "agt_5iE2WDDBSUgSQtUKVYTDPB")
+EXPENSE_REVIEW_AGENT_ID = _env("EXPENSE_REVIEW_AGENT_ID", "agt_XnU6HKXmfTtzZDXDUdWte7")
+
+# 3번 워크플로우(엑셀 정리·집계): 현재 앱에서는 호출하지 않는다.
+# 여러 영수증을 합치는 집계는 Python(excel_builder.py)이 담당한다.
+EXCEL_SUMMARY_AGENT_ID = _env("EXCEL_SUMMARY_AGENT_ID", "agt_iBcXUvFaeUGnnEEDJEhJib")
+
+##################################################
+# Config ID (선택)
+# 비워두면 Studio에 배포된 기본 설정으로 실행된다.
+# 특정 설정 버전을 고정하고 싶을 때만 cfg_ 값을 넣는다.
+##################################################
+
+RECEIPT_EXTRACT_CONFIG_ID = _env("RECEIPT_EXTRACT_CONFIG_ID")
+EXPENSE_REVIEW_CONFIG_ID = _env("EXPENSE_REVIEW_CONFIG_ID")
+
+##################################################
+# 실행 옵션
+##################################################
+
+# 1 이면 API를 호출하지 않고 가짜 결과로 화면만 테스트한다.
+USE_MOCK = _env("USE_MOCK", "0").lower() in ("1", "true", "yes")
+
+POLL_INTERVAL_SEC = _env_int("POLL_INTERVAL_SEC", 2)
+JOB_TIMEOUT_SEC = _env_int("JOB_TIMEOUT_SEC", 180)
+MAX_WORKERS = _env_int("MAX_WORKERS", 3)  # 동시에 처리할 영수증 수
+
+
+def missing_settings() -> list[str]:
+    """실제 API 호출에 필요한데 비어 있는 설정 이름 목록."""
+    if USE_MOCK:
+        return []
+    missing = []
+    if not UPSTAGE_API_KEY:
+        missing.append("UPSTAGE_API_KEY")
+    if not RECEIPT_EXTRACT_AGENT_ID:
+        missing.append("RECEIPT_EXTRACT_AGENT_ID")
+    if not EXPENSE_REVIEW_AGENT_ID:
+        missing.append("EXPENSE_REVIEW_AGENT_ID")
+    return missing
