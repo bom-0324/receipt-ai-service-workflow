@@ -247,7 +247,57 @@ COLUMNS = ["사용일자", "분기", "상호명", "결제금액", "경비구분"
 REVIEW_OPTIONS = ["검토 필요", "검토 완료", "검토 불필요"]
 
 
-def merge_row(file_name: str, extract: dict | None, review: dict | None, errors: list[str]) -> dict:
+##################################################
+# 검산: AI가 '자신 있게 틀린' 값을 잡기 위한 규칙
+##################################################
+
+def sanity_check(extract: dict, today=None) -> list[str]:
+    """추가 AI 호출 없이 코드로 확인할 수 있는 이상값."""
+    import datetime as _dt
+
+    problems = []
+    amount = extract.get("결제금액")
+    currency = extract.get("통화") or "KRW"
+    if isinstance(amount, (int, float)):
+        if amount <= 0:
+            problems.append(f"금액이 0 이하({amount:,})")
+        elif currency == "KRW" and (amount < 100 or not float(amount).is_integer()):
+            # 예: '10,300원'을 10.3으로 읽은 경우
+            problems.append(f"원화 금액이 비정상적임({amount}) — 쉼표/소수점 오인식 의심")
+
+    date = extract.get("사용일자") or ""
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", date)
+    if date and not m:
+        problems.append(f"날짜 형식을 읽지 못함({date})")
+    elif m:
+        try:
+            d = _dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            if d > (today or _dt.date.today()):
+                problems.append(f"미래 날짜({date}) — 연도/월 오인식 의심")
+        except ValueError:
+            problems.append(f"존재하지 않는 날짜({date})")
+    return problems
+
+
+def compare_verify(extract: dict, verify: dict) -> list[str]:
+    """1번(추출)과 3번(검증)이 같은 사진을 각자 읽은 값이 다르면 사유를 돌려준다."""
+    problems = []
+    a1, a2 = extract.get("결제금액"), verify.get("결제금액")
+    if a1 not in (None, "") and a2 not in (None, "") and float(a1) != float(a2):
+        problems.append(f"교차검증 불일치: 금액 {a1:,} ≠ {a2:,}")
+    d1, d2 = extract.get("사용일자"), verify.get("사용일자")
+    if d1 and d2 and d1 != d2:
+        problems.append(f"교차검증 불일치: 날짜 {d1} ≠ {d2}")
+    return problems
+
+
+def merge_row(
+    file_name: str,
+    extract: dict | None,
+    review: dict | None,
+    errors: list[str],
+    verify: dict | None = None,
+) -> dict:
     extract = extract or {}
     review = review or {}
 
@@ -258,9 +308,13 @@ def merge_row(file_name: str, extract: dict | None, review: dict | None, errors:
     missing = [k for k in ("사용일자", "상호명", "결제금액") if extract.get(k) in (None, "")]
     if missing and extract:
         reasons.append("필수값 누락: " + ", ".join(missing))
+    checks = sanity_check(extract) if extract else []
+    if verify and extract:
+        checks += compare_verify(extract, verify)
+    reasons.extend(checks)
     if errors:
         reasons.extend(errors)
-    if missing or errors or not review_flag:
+    if missing or checks or errors or not review_flag:
         review_flag = "검토 필요"
 
     return {

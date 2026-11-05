@@ -86,12 +86,21 @@ def upload_file(file_name: str, data: bytes) -> str:
     return uploaded.id
 
 
-def delete_file(file_id: str) -> None:
-    """업로드한 파일 정리(실패해도 무시)."""
+def delete_file(file_id: str) -> bool:
+    """
+    업로드한 파일을 Upstage에서 삭제한다.
+    응답의 deleted 값으로 성공을 확인하고, 실패하면 서버 로그(Railway Logs)에 남긴다.
+    반환: 삭제가 확인되면 True
+    """
     try:
-        get_client().files.delete(file_id)
-    except Exception:  # noqa: BLE001
-        pass
+        res = get_client().files.delete(file_id)
+        ok = bool(getattr(res, "deleted", False))
+        if not ok:
+            print(f"[delete_file] 삭제 응답이 확인되지 않음: {file_id} ({res})", flush=True)
+        return ok
+    except Exception as e:  # noqa: BLE001
+        print(f"[delete_file] 삭제 실패: {file_id} ({type(e).__name__}: {e})", flush=True)
+        return False
 
 
 ##################################################

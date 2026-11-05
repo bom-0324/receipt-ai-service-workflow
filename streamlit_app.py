@@ -361,8 +361,12 @@ if work:
                 st.markdown(f"**{d['파일명']}**")
                 for err in d["errors"]:
                     st.error(err)
-                col_x, col_y = st.columns(2)
+                for note in d.get("notes", []):
+                    st.warning(note)
+                col_x, col_y, col_z = st.columns(3)
                 col_x.caption("1번 추출 Agent 응답")
                 col_x.code(d["extract_raw"] or "(없음)", language="json")
                 col_y.caption("2번 검토 Agent 응답")
                 col_y.code(d["review_raw"] or "(없음)", language="json")
+                col_z.caption("3번 검증 Agent 응답")
+                col_z.code(d.get("verify_raw") or "(없음)", language="json")
