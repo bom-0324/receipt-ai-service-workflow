@@ -45,19 +45,26 @@ def _process_one(file_name: str, data: bytes) -> tuple[dict, dict]:
         if not config.USE_MOCK:
             file_id = upload_file(file_name, data)
 
+
         # 읽기(1번)와 검증(3번)은 서로 기다릴 필요가 없어서 동시에 시작한다.
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        # 2번이 사진으로 분류하는 모드(file)라면 2번도 1번을 기다릴 필요가 없으니 같이 시작한다.
+        review_by_file = config.REVIEW_INPUT != "text"
+        with ThreadPoolExecutor(max_workers=3) as pool:
             f_extract = pool.submit(run_receipt_extract_agent, file_id, file_name)
             f_verify = pool.submit(run_verify_agent, file_id, file_name) if verify_enabled() else None
+            f_review = pool.submit(run_expense_review_agent, file_id, file_name) if review_by_file else None
 
             try:
                 extract, detail["extract_raw"] = f_extract.result()
             except AgentError as e:
                 detail["errors"].append(f"추출 실패: {e}")
 
-            # 분류(2번)는 1번 결과를 받아서 한다. 그동안 3번은 계속 돌고 있다.
+            # text 모드: 분류(2번)는 1번 결과를 받아서 한다. 그동안 3번은 계속 돌고 있다.
             try:
-                review, detail["review_raw"] = _review(file_id, file_name, detail)
+                if f_review is not None:
+                    review, detail["review_raw"] = f_review.result()
+                else:
+                    review, detail["review_raw"] = _review(file_id, file_name, detail)
             except AgentError as e:
                 detail["errors"].append(f"검토 실패: {e}")
 

@@ -15,7 +15,19 @@ try:  # 드래그로 컬럼 순서를 바꾸는 컴포넌트 (pip install stream
 except ImportError:
     sort_items = None
 
-st.set_page_config(page_title="영수증 경비 정리 서비스", layout="wide")
+st.set_page_config(page_title="영수증 콜렉터", page_icon="🧾", layout="wide")
+
+# 앱처럼 보이게: Streamlit 메뉴·상단 장식 숨기기
+st.markdown(
+    """
+    <style>
+    #MainMenu, footer,
+    [data-testid="stToolbar"], [data-testid="stDecoration"] {visibility: hidden;}
+    header[data-testid="stHeader"] {background: transparent;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 st.title("영수증 경비 정리 서비스")
 st.write("영수증을 여러 장 올리면 1장당 1행으로 정리하고 엑셀로 내려받을 수 있습니다.")
