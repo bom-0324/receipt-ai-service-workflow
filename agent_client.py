@@ -107,16 +107,16 @@ def delete_file(file_id: str) -> bool:
 # Responses API (Job)
 ##################################################
 
-def _create_job(agent_id: str, file_id: str, config_id: str = ""):
+def _create_job(agent_id: str, file_id: str, config_id: str = "", text: str = ""):
+    # text가 있으면 사진 대신 글을 입력으로 보낸다 (2번 분류가 1번 결과를 받을 때).
+    if text:
+        content = [{"type": "input_text", "text": text}]
+    else:
+        content = [{"type": "input_file", "file_id": file_id}]
     kwargs = {
         "model": agent_id,
         "include": ["last"],
-        "input": [
-            {
-                "role": "user",
-                "content": [{"type": "input_file", "file_id": file_id}],
-            }
-        ],
+        "input": [{"role": "user", "content": content}],
     }
     if config_id:
         kwargs["extra_body"] = {"config_id": config_id}
@@ -234,12 +234,12 @@ def to_dict(data, text: str) -> dict:
     raise AgentError(f"예상하지 못한 결과 형식입니다: {text[:200]}")
 
 
-def run_agent(agent_id: str, file_id: str, config_id: str = "") -> tuple[dict, str]:
+def run_agent(agent_id: str, file_id: str, config_id: str = "", text: str = "") -> tuple[dict, str]:
     """
-    업로드된 파일 하나로 Studio Agent를 실행한다.
+    업로드된 파일 하나(또는 text)로 Studio Agent를 실행한다.
     반환: (파싱된 dict, 원본 output_text)
     """
-    resp = _create_job(agent_id, file_id, config_id)
+    resp = _create_job(agent_id, file_id, config_id, text)
     resp = _wait(agent_id, resp)
     text = _output_text(resp)
     try:
