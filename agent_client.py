@@ -86,28 +86,37 @@ def upload_file(file_name: str, data: bytes) -> str:
     return uploaded.id
 
 
-def delete_file(file_id: str) -> None:
-    """업로드한 파일 정리(실패해도 무시)."""
+def delete_file(file_id: str) -> bool:
+    """
+    업로드한 파일을 Upstage에서 삭제한다.
+    응답의 deleted 값으로 성공을 확인하고, 실패하면 서버 로그(Railway Logs)에 남긴다.
+    반환: 삭제가 확인되면 True
+    """
     try:
-        get_client().files.delete(file_id)
-    except Exception:  # noqa: BLE001
-        pass
+        res = get_client().files.delete(file_id)
+        ok = bool(getattr(res, "deleted", False))
+        if not ok:
+            print(f"[delete_file] 삭제 응답이 확인되지 않음: {file_id} ({res})", flush=True)
+        return ok
+    except Exception as e:  # noqa: BLE001
+        print(f"[delete_file] 삭제 실패: {file_id} ({type(e).__name__}: {e})", flush=True)
+        return False
 
 
 ##################################################
 # Responses API (Job)
 ##################################################
 
-def _create_job(agent_id: str, file_id: str, config_id: str = ""):
+def _create_job(agent_id: str, file_id: str, config_id: str = "", text: str = ""):
+    # text가 있으면 사진 대신 글을 입력으로 보낸다 (2번 분류가 1번 결과를 받을 때).
+    if text:
+        content = [{"type": "input_text", "text": text}]
+    else:
+        content = [{"type": "input_file", "file_id": file_id}]
     kwargs = {
         "model": agent_id,
         "include": ["last"],
-        "input": [
-            {
-                "role": "user",
-                "content": [{"type": "input_file", "file_id": file_id}],
-            }
-        ],
+        "input": [{"role": "user", "content": content}],
     }
     if config_id:
         kwargs["extra_body"] = {"config_id": config_id}
@@ -225,12 +234,12 @@ def to_dict(data, text: str) -> dict:
     raise AgentError(f"예상하지 못한 결과 형식입니다: {text[:200]}")
 
 
-def run_agent(agent_id: str, file_id: str, config_id: str = "") -> tuple[dict, str]:
+def run_agent(agent_id: str, file_id: str, config_id: str = "", text: str = "") -> tuple[dict, str]:
     """
-    업로드된 파일 하나로 Studio Agent를 실행한다.
+    업로드된 파일 하나(또는 text)로 Studio Agent를 실행한다.
     반환: (파싱된 dict, 원본 output_text)
     """
-    resp = _create_job(agent_id, file_id, config_id)
+    resp = _create_job(agent_id, file_id, config_id, text)
     resp = _wait(agent_id, resp)
     text = _output_text(resp)
     try:

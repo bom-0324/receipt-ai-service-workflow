@@ -28,6 +28,15 @@ def _env_int(name: str, default: int) -> int:
 
 UPSTAGE_API_KEY = _env("UPSTAGE_API_KEY")
 UPSTAGE_BASE_URL = _env("UPSTAGE_BASE_URL", "https://api.upstage.ai/v2")
+# (예전) 3번 워크플로우: 엑셀 정리·집계. 집계는 Python(excel_builder.py)이 담당한다.
+EXCEL_SUMMARY_AGENT_ID = _env("EXCEL_SUMMARY_AGENT_ID", "agt_iBcXUvFaeUGnnEEDJEhJib")
+
+# 3번 워크플로우: 교차 검증. 사진을 한 번 더 읽어 1번 결과(금액·날짜)와 비교한다.
+# 따로 지정하지 않으면 기존 3번 Agent를 검증용으로 고쳐 쓴다고 보고 그 ID를 쓴다.
+# 끄고 싶으면 VERIFY_AGENT_ID=off 로 둔다.
+_verify = _env("VERIFY_AGENT_ID", EXCEL_SUMMARY_AGENT_ID)
+VERIFY_AGENT_ID = "" if _verify.lower() in ("off", "0", "none") else _verify
+
 
 ##################################################
 # Studio Agent ID ("API로 이용하기"에서 복사한 agt_ 값)
@@ -48,6 +57,7 @@ EXCEL_SUMMARY_AGENT_ID = _env("EXCEL_SUMMARY_AGENT_ID", "agt_iBcXUvFaeUGnnEEDJEh
 
 RECEIPT_EXTRACT_CONFIG_ID = _env("RECEIPT_EXTRACT_CONFIG_ID")
 EXPENSE_REVIEW_CONFIG_ID = _env("EXPENSE_REVIEW_CONFIG_ID")
+VERIFY_CONFIG_ID = _env("VERIFY_CONFIG_ID")
 
 ##################################################
 # 실행 옵션
@@ -60,6 +70,8 @@ POLL_INTERVAL_SEC = _env_int("POLL_INTERVAL_SEC", 2)
 JOB_TIMEOUT_SEC = _env_int("JOB_TIMEOUT_SEC", 180)
 MAX_WORKERS = _env_int("MAX_WORKERS", 3)  # 동시에 처리할 영수증 수
 
+# 2번 분류가 무엇을 보고 판단할지: text = 1번 추출 결과(빠름), file = 사진을 다시 읽음(예전 방식)
+REVIEW_INPUT = _env("REVIEW_INPUT", "text").lower()
 
 def missing_settings() -> list[str]:
     """실제 API 호출에 필요한데 비어 있는 설정 이름 목록."""
